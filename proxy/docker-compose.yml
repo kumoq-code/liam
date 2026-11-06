@@ -1,0 +1,28 @@
+# Proxy inverso común para TODAS las apps del VPS.
+# Lee las etiquetas "caddy" de los contenedores de la red "proxy"
+# y genera HTTPS automático (Let's Encrypt) para cada subdominio.
+#
+# Uso (una sola vez):  cp -r proxy /srv/proxy && cd /srv/proxy && docker compose up -d
+services:
+  caddy:
+    image: lucaslorentz/caddy-docker-proxy:2.9-alpine
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      - CADDY_INGRESS_NETWORKS=proxy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - caddy_data:/data
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    name: proxy
+
+volumes:
+  caddy_data:

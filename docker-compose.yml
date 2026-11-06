@@ -1,0 +1,25 @@
+services:
+  liam:
+    # Imagen construida por GitHub Actions (el VPS no compila nada)
+    image: ghcr.io/kumoq-code/liam:latest
+    # Alternativa: compilar en el propio VPS con `docker compose build` (necesita ~1,5 GB de RAM/swap)
+    build: .
+    pull_policy: always
+    container_name: liam
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-Europe/Madrid}
+      - NUXT_AUTH_USER=${AUTH_USER:-}
+      - NUXT_AUTH_PASSWORD=${AUTH_PASSWORD:-}
+    volumes:
+      - ./data:/app/data
+    networks:
+      - proxy
+    labels:
+      # Subdominio de la app: el proxy (carpeta proxy/) genera el HTTPS solo
+      caddy: ${DOMAIN:?Define DOMAIN en .env}
+      caddy.reverse_proxy: "{{upstreams 3000}}"
+
+networks:
+  proxy:
+    external: true
