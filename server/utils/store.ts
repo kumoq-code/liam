@@ -2,12 +2,16 @@ import { promises as fs } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
-export type EventType = 'bottle' | 'diaper' | 'growth'
+export type EventType = 'bottle' | 'breast' | 'diaper' | 'growth'
+export type BreastSide = 'left' | 'right' | 'both'
 
 export interface BabyEvent {
   id: string
   type: EventType
-  time: string // ISO
+  time: string // ISO (en lactancia: inicio de la toma)
+  endTime?: string // ISO, fin de la toma de pecho (si se registró inicio y fin)
+  duration?: number // minutos (lactancia materna)
+  side?: BreastSide // pecho usado
   amount?: number // ml (biberón)
   wet?: boolean // pañal mojado
   dirty?: boolean // pañal manchado

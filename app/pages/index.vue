@@ -1,8 +1,11 @@
 <script setup lang="ts">
 interface BabyEvent {
   id: string
-  type: 'bottle' | 'diaper'
+  type: 'bottle' | 'breast' | 'diaper'
   time: string
+  endTime?: string
+  duration?: number
+  side?: 'left' | 'right' | 'both'
   amount?: number
   wet?: boolean
   dirty?: boolean
@@ -47,7 +50,7 @@ async function load() {
     const all = await $fetch<BabyEvent[]>('/api/events', {
       query: { from: from.toISOString(), to: to.toISOString() },
     })
-    events.value = all.filter((e) => e.type === 'bottle' || e.type === 'diaper')
+    events.value = all.filter((e) => e.type === 'bottle' || e.type === 'breast' || e.type === 'diaper')
   } catch (e: any) {
     if (handleAuthError(e)) return
     error.value = e?.statusMessage || 'No se pudieron cargar los registros'
@@ -67,13 +70,23 @@ watch(selectedDate, load)
 let timer: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
   load()
-  timer = setInterval(() => (now.value = new Date()), 30_000)
+  timer = setInterval(() => (now.value = new Date()), 1_000)
+  try {
+    const saved = JSON.parse(localStorage.getItem(TIMER_KEY) || 'null')
+    if (saved?.start && !Number.isNaN(new Date(saved.start).getTime())) {
+      timerStart.value = saved.start
+      breastSide.value = saved.side ?? null
+      breastMode.value = 'range'
+    }
+  } catch {}
 })
 onBeforeUnmount(() => clearInterval(timer))
 
 // --- Resumen ---
 const bottles = computed(() => events.value.filter((e) => e.type === 'bottle'))
 const diapers = computed(() => events.value.filter((e) => e.type === 'diaper'))
+const breasts = computed(() => events.value.filter((e) => e.type === 'breast'))
+const breastMinutes = computed(() => breasts.value.reduce((s, e) => s + (e.duration || 0), 0))
 const totalMl = computed(() => bottles.value.reduce((s, e) => s + (e.amount || 0), 0))
 const wetCount = computed(() => diapers.value.filter((e) => e.wet).length)
 const dirtyCount = computed(() => diapers.value.filter((e) => e.dirty).length)
@@ -87,7 +100,10 @@ function sinceLabel(iso?: string) {
   const m = mins % 60
   return `hace ${h} h${m ? ` ${m} min` : ''}`
 }
-const lastBottle = computed(() => (isToday.value ? bottles.value[0] : undefined))
+const lastFeed = computed(() =>
+  isToday.value ? events.value.find((e) => e.type === 'bottle' || e.type === 'breast') : undefined,
+)
+const feedLabel = (e: BabyEvent) => (e.type === 'bottle' ? `biberón ${e.amount} ml` : `pecho ${e.duration} min`)
 
 // --- Formularios ---
 const bottleAmount = ref<number | null>(90)
@@ -96,6 +112,117 @@ const diaperWet = ref(true)
 const diaperDirty = ref(false)
 const diaperTime = ref('')
 const quickAmounts = [30, 60, 90, 120, 150, 180]
+
+// --- Lactancia materna ---
+type Side = 'left' | 'right' | 'both'
+const TIMER_KEY = 'liam_breast_timer'
+const sideOptions: { value: Side; label: string }[] = [
+  { value: 'left', label: 'Izquierdo' },
+  { value: 'right', label: 'Derecho' },
+  { value: 'both', label: 'Ambos' },
+]
+const sideLabel = (s?: Side) => sideOptions.find((o) => o.value === s)?.label
+const breastMode = ref<'manual' | 'range'>('manual')
+const breastSide = ref<Side | null>(null)
+const breastMinutesInput = ref<number | null>(15)
+const breastTime = ref('') // modo manual: hora de inicio
+const breastStart = ref('') // modo inicio/fin
+const breastEnd = ref('')
+const quickMinutes = [5, 10, 15, 20, 30, 40]
+const timerStart = ref<string | null>(null) // ISO del cronómetro en marcha
+
+const timerElapsed = computed(() => {
+  if (!timerStart.value) return ''
+  const secs = Math.max(0, Math.floor((now.value.getTime() - new Date(timerStart.value).getTime()) / 1000))
+  const h = Math.floor(secs / 3600)
+  const m = Math.floor((secs % 3600) / 60)
+  return `${h ? `${h}:` : ''}${pad(m)}:${pad(secs % 60)}`
+})
+
+const rangeMinutes = computed(() => {
+  if (!breastStart.value || !breastEnd.value) return null
+  const [sh, sm] = breastStart.value.split(':').map(Number)
+  const [eh, em] = breastEnd.value.split(':').map(Number)
+  let mins = eh! * 60 + em! - (sh! * 60 + sm!)
+  if (mins <= 0) mins += 24 * 60 // cruza la medianoche
+  return mins
+})
+
+function persistTimer() {
+  try {
+    if (timerStart.value) localStorage.setItem(TIMER_KEY, JSON.stringify({ start: timerStart.value, side: breastSide.value }))
+    else localStorage.removeItem(TIMER_KEY)
+  } catch {}
+}
+watch(breastSide, () => timerStart.value && persistTimer())
+
+function startTimer() {
+  error.value = ''
+  timerStart.value = new Date().toISOString()
+  persistTimer()
+}
+
+function cancelTimer() {
+  if (!confirm('¿Descartar el cronómetro en marcha?')) return
+  timerStart.value = null
+  persistTimer()
+}
+
+async function stopTimer() {
+  if (!timerStart.value) return
+  const end = new Date()
+  if (end.getTime() - new Date(timerStart.value).getTime() < 30_000) {
+    error.value = 'La toma ha durado menos de 30 segundos'
+    return
+  }
+  const ok = await save({
+    type: 'breast',
+    time: timerStart.value,
+    endTime: end.toISOString(),
+    side: breastSide.value ?? undefined,
+  })
+  if (ok) {
+    timerStart.value = null
+    breastSide.value = null
+    persistTimer()
+    selectedDate.value = toDateInput(new Date())
+  }
+}
+
+async function addBreast() {
+  let payload: Record<string, unknown>
+  if (breastMode.value === 'manual') {
+    const mins = breastMinutesInput.value
+    if (!mins || mins <= 0) {
+      error.value = 'Indica los minutos de la toma'
+      return
+    }
+    let time = buildTime(breastTime.value)
+    // Sin hora y en el día de hoy: la toma acaba de terminar
+    if (!breastTime.value && isToday.value) time = new Date(Date.now() - mins * 60000).toISOString()
+    payload = { type: 'breast', time, duration: mins }
+  } else {
+    if (!breastStart.value || !breastEnd.value) {
+      error.value = 'Indica la hora de inicio y de fin'
+      return
+    }
+    const start = new Date(buildTime(breastStart.value))
+    const end = new Date(start.getTime() + rangeMinutes.value! * 60000)
+    payload = { type: 'breast', time: start.toISOString(), endTime: end.toISOString() }
+  }
+  if (await save({ ...payload, side: breastSide.value ?? undefined })) {
+    breastTime.value = ''
+    breastStart.value = ''
+    breastEnd.value = ''
+    breastSide.value = null
+  }
+}
+
+function setNow(target: 'start' | 'end') {
+  const t = toTimeInput(new Date())
+  if (target === 'start') breastStart.value = t
+  else breastEnd.value = t
+}
 
 function buildTime(time: string) {
   const { from } = dayRange(selectedDate.value)
@@ -214,12 +341,14 @@ const formatTime = (iso: string) => toTimeInput(new Date(iso))
       <!-- Resumen -->
       <section class="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
         <div class="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-          <p class="text-xs font-medium uppercase text-slate-500">Tomas</p>
+          <p class="text-xs font-medium uppercase text-slate-500">Biberones</p>
           <p class="mt-1 text-2xl font-bold text-pink-600">{{ bottles.length }}</p>
+          <p class="text-xs text-slate-400">{{ totalMl }} ml</p>
         </div>
         <div class="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-          <p class="text-xs font-medium uppercase text-slate-500">Total</p>
-          <p class="mt-1 text-2xl font-bold text-pink-600">{{ totalMl }}<span class="text-sm font-medium"> ml</span></p>
+          <p class="text-xs font-medium uppercase text-slate-500">Pecho</p>
+          <p class="mt-1 text-2xl font-bold text-rose-600">{{ breasts.length }}</p>
+          <p class="text-xs text-slate-400">{{ breastMinutes }} min</p>
         </div>
         <div class="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
           <p class="text-xs font-medium uppercase text-slate-500">Mojados</p>
@@ -234,7 +363,7 @@ const formatTime = (iso: string) => toTimeInput(new Date(iso))
       <p v-if="isToday" class="mb-5 text-center text-sm text-slate-500">
         Última toma:
         <span class="font-medium text-slate-700">
-          {{ lastBottle ? `${formatTime(lastBottle.time)} (${sinceLabel(lastBottle.time)})` : 'ninguna todavía' }}
+          {{ lastFeed ? `${formatTime(lastFeed.time)} · ${feedLabel(lastFeed)} (${sinceLabel(lastFeed.endTime || lastFeed.time)})` : 'ninguna todavía' }}
         </span>
       </p>
 
@@ -295,6 +424,157 @@ const formatTime = (iso: string) => toTimeInput(new Date(iso))
         </button>
       </section>
 
+      <!-- Lactancia materna -->
+      <section class="mb-4 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+        <h2 class="mb-3 font-semibold">🤱 Lactancia materna</h2>
+
+        <!-- Pecho -->
+        <div class="mb-3 grid grid-cols-3 gap-2">
+          <button
+            v-for="o in sideOptions"
+            :key="o.value"
+            class="rounded-xl py-2 text-sm font-medium ring-1 transition"
+            :class="
+              breastSide === o.value
+                ? 'bg-rose-500 text-white ring-rose-500'
+                : 'bg-white text-slate-600 ring-slate-200 hover:bg-rose-50'
+            "
+            @click="breastSide = breastSide === o.value ? null : o.value"
+          >
+            {{ o.label }}
+          </button>
+        </div>
+
+        <!-- Cronómetro en marcha -->
+        <div v-if="timerStart" class="rounded-xl bg-rose-50 p-4 text-center ring-1 ring-rose-100">
+          <p class="text-xs font-medium uppercase text-rose-700">Toma en curso · desde {{ formatTime(timerStart) }}</p>
+          <p class="my-1 font-mono text-4xl font-bold tabular-nums text-rose-600">{{ timerElapsed }}</p>
+          <div class="mt-3 flex gap-2">
+            <button
+              class="flex-1 rounded-xl bg-rose-500 py-3 font-semibold text-white shadow-sm transition hover:bg-rose-600 disabled:opacity-50"
+              :disabled="saving"
+              @click="stopTimer"
+            >
+              ⏹ Terminar y guardar
+            </button>
+            <button
+              class="rounded-xl px-4 py-3 text-sm font-medium text-slate-500 ring-1 ring-slate-200 hover:bg-white"
+              @click="cancelTimer"
+            >
+              Descartar
+            </button>
+          </div>
+        </div>
+
+        <template v-else>
+          <!-- Modo -->
+          <div class="mb-3 grid grid-cols-2 rounded-xl bg-slate-100 p-1 text-sm font-medium">
+            <button
+              class="rounded-lg py-1.5 transition"
+              :class="breastMode === 'manual' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'"
+              @click="breastMode = 'manual'"
+            >
+              Tiempo a mano
+            </button>
+            <button
+              class="rounded-lg py-1.5 transition"
+              :class="breastMode === 'range' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'"
+              @click="breastMode = 'range'"
+            >
+              Inicio y fin
+            </button>
+          </div>
+
+          <template v-if="breastMode === 'manual'">
+            <div class="mb-3 flex flex-wrap gap-2">
+              <button
+                v-for="q in quickMinutes"
+                :key="q"
+                class="rounded-full px-3 py-1.5 text-sm font-medium ring-1 transition"
+                :class="
+                  breastMinutesInput === q
+                    ? 'bg-rose-500 text-white ring-rose-500'
+                    : 'bg-white text-slate-600 ring-slate-200 hover:bg-rose-50'
+                "
+                @click="breastMinutesInput = q"
+              >
+                {{ q }} min
+              </button>
+            </div>
+            <div class="flex gap-2">
+              <label class="flex-1">
+                <span class="mb-1 block text-xs text-slate-500">Duración (min)</span>
+                <input
+                  v-model.number="breastMinutesInput"
+                  type="number"
+                  min="1"
+                  max="240"
+                  inputmode="numeric"
+                  class="w-full rounded-xl border border-slate-200 px-3 py-2 focus:border-rose-400 focus:outline-none focus:ring-2 focus:ring-rose-200"
+                />
+              </label>
+              <label class="flex-1">
+                <span class="mb-1 block text-xs text-slate-500">
+                  Hora inicio {{ isToday ? '(vacío = acaba de terminar)' : '' }}
+                </span>
+                <input
+                  v-model="breastTime"
+                  type="time"
+                  class="w-full rounded-xl border border-slate-200 px-3 py-2 focus:border-rose-400 focus:outline-none focus:ring-2 focus:ring-rose-200"
+                />
+              </label>
+            </div>
+          </template>
+
+          <template v-else>
+            <button
+              v-if="isToday"
+              class="mb-3 w-full rounded-xl py-3 font-semibold text-rose-600 ring-1 ring-rose-300 transition hover:bg-rose-50"
+              @click="startTimer"
+            >
+              ▶ Empezar ahora (cronómetro)
+            </button>
+            <div class="flex gap-2">
+              <div class="flex-1">
+                <span class="mb-1 flex items-center justify-between text-xs text-slate-500">
+                  Inicio
+                  <button v-if="isToday" type="button" class="font-medium text-rose-500" @click="setNow('start')">ahora</button>
+                </span>
+                <input
+                  v-model="breastStart"
+                  type="time"
+                  aria-label="Hora de inicio"
+                  class="w-full rounded-xl border border-slate-200 px-3 py-2 focus:border-rose-400 focus:outline-none focus:ring-2 focus:ring-rose-200"
+                />
+              </div>
+              <div class="flex-1">
+                <span class="mb-1 flex items-center justify-between text-xs text-slate-500">
+                  Fin
+                  <button v-if="isToday" type="button" class="font-medium text-rose-500" @click="setNow('end')">ahora</button>
+                </span>
+                <input
+                  v-model="breastEnd"
+                  type="time"
+                  aria-label="Hora de fin"
+                  class="w-full rounded-xl border border-slate-200 px-3 py-2 focus:border-rose-400 focus:outline-none focus:ring-2 focus:ring-rose-200"
+                />
+              </div>
+            </div>
+            <p v-if="rangeMinutes" class="mt-2 text-center text-sm text-slate-500">
+              Duración: <span class="font-semibold text-rose-600">{{ rangeMinutes }} min</span>
+            </p>
+          </template>
+
+          <button
+            class="mt-3 w-full rounded-xl bg-rose-500 py-3 font-semibold text-white shadow-sm transition hover:bg-rose-600 disabled:opacity-50"
+            :disabled="saving"
+            @click="addBreast"
+          >
+            Registrar toma de pecho
+          </button>
+        </template>
+      </section>
+
       <!-- Nuevo pañal -->
       <section class="mb-6 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
         <h2 class="mb-3 font-semibold">🧷 Cambio de pañal</h2>
@@ -347,10 +627,15 @@ const formatTime = (iso: string) => toTimeInput(new Date(iso))
             class="flex items-center gap-3 rounded-xl bg-white px-4 py-3 shadow-sm ring-1 ring-slate-200"
           >
             <span class="w-12 font-mono text-sm text-slate-500">{{ formatTime(ev.time) }}</span>
-            <span class="text-xl">{{ ev.type === 'bottle' ? '🍼' : '🧷' }}</span>
+            <span class="text-xl">{{ ev.type === 'bottle' ? '🍼' : ev.type === 'breast' ? '🤱' : '🧷' }}</span>
             <span class="flex-1">
               <template v-if="ev.type === 'bottle'">
                 <span class="font-semibold text-pink-600">{{ ev.amount }} ml</span>
+              </template>
+              <template v-else-if="ev.type === 'breast'">
+                <span class="font-semibold text-rose-600">{{ ev.duration }} min</span>
+                <span v-if="ev.endTime" class="ml-1.5 text-xs text-slate-400">hasta {{ formatTime(ev.endTime) }}</span>
+                <span v-if="ev.side" class="ml-1.5 rounded-full bg-rose-100 px-2 py-0.5 text-xs font-medium text-rose-700">{{ sideLabel(ev.side) }}</span>
               </template>
               <template v-else>
                 <span v-if="ev.wet" class="mr-1 rounded-full bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-700">Mojado</span>

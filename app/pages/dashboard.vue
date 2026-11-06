@@ -5,8 +5,11 @@ useHead({ title: 'Panel · Liam' })
 
 interface BabyEvent {
   id: string
-  type: 'bottle' | 'diaper' | 'growth'
+  type: 'bottle' | 'breast' | 'diaper' | 'growth'
   time: string
+  endTime?: string
+  duration?: number
+  side?: 'left' | 'right' | 'both'
   amount?: number
   wet?: boolean
   dirty?: boolean
@@ -107,17 +110,24 @@ onMounted(() => Promise.all([loadMonth(), loadWeek(), loadGrowth()]))
 interface DayStats {
   ml: number
   feeds: number
+  breast: number // tomas de pecho
+  breastMin: number // minutos de pecho
   wet: number
   dirty: number
 }
+const empty: DayStats = { ml: 0, feeds: 0, breast: 0, breastMin: 0, wet: 0, dirty: 0 }
+
 function aggregate(events: BabyEvent[]) {
   const map = new Map<string, DayStats>()
   for (const e of events) {
     const k = dateKey(new Date(e.time))
-    const s = map.get(k) || { ml: 0, feeds: 0, wet: 0, dirty: 0 }
+    const s = map.get(k) || { ...empty }
     if (e.type === 'bottle') {
       s.ml += e.amount || 0
       s.feeds++
+    } else if (e.type === 'breast') {
+      s.breast++
+      s.breastMin += e.duration || 0
     } else if (e.type === 'diaper') {
       if (e.wet) s.wet++
       if (e.dirty) s.dirty++
@@ -126,7 +136,6 @@ function aggregate(events: BabyEvent[]) {
   }
   return map
 }
-const empty: DayStats = { ml: 0, feeds: 0, wet: 0, dirty: 0 }
 
 const monthStats = computed(() => aggregate(monthEvents.value))
 
@@ -148,7 +157,14 @@ const summary = computed(() => {
   }
   const elapsed = points.value.filter((p) => p.ml !== null)
   const tot = [...monthStats.value.values()].reduce(
-    (a, s) => ({ ml: a.ml + s.ml, feeds: a.feeds + s.feeds, wet: a.wet + s.wet, dirty: a.dirty + s.dirty }),
+    (a, s) => ({
+      ml: a.ml + s.ml,
+      feeds: a.feeds + s.feeds,
+      breast: a.breast + s.breast,
+      breastMin: a.breastMin + s.breastMin,
+      wet: a.wet + s.wet,
+      dirty: a.dirty + s.dirty,
+    }),
     { ...empty },
   )
   // Media diaria sobre días con alguna toma registrada
@@ -168,7 +184,7 @@ const dayLabel = computed(() =>
 const dayFeeds = computed(() =>
   day.value
     ? monthEvents.value
-        .filter((e) => e.type === 'bottle' && dateKey(new Date(e.time)) === day.value)
+        .filter((e) => (e.type === 'bottle' || e.type === 'breast') && dateKey(new Date(e.time)) === day.value)
         .sort((a, b) => a.time.localeCompare(b.time))
     : [],
 )
@@ -192,6 +208,7 @@ const weekRanking = computed(() => {
   const worst = pool.reduce((a, b) => (b.ml < a.ml ? b : a))
   return { best, worst, partial, count: pool.length }
 })
+const sideShort = { left: 'Izq.', right: 'Der.', both: 'Ambos' } as const
 const weekdayName = (d: Date) => d.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric' })
 
 // --- Crecimiento ---
@@ -298,18 +315,25 @@ const inputClass =
       <h2 class="mb-2 text-sm font-medium text-slate-500 first-letter:uppercase">
         {{ day ? dayLabel : monthLabel }}
       </h2>
-      <section class="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <section class="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-5">
         <div class="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-          <p class="text-xs font-medium uppercase text-slate-500">Total</p>
+          <p class="text-xs font-medium uppercase text-slate-500">🍼 Biberón</p>
           <p class="mt-1 text-2xl font-bold">{{ summary.ml.toLocaleString('es-ES') }}<span class="text-sm font-medium text-slate-500"> ml</span></p>
           <p class="text-xs text-slate-400">{{ summary.feeds }} tomas</p>
         </div>
         <div class="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-          <p class="text-xs font-medium uppercase text-slate-500">{{ day ? 'Por toma' : 'Media diaria' }}</p>
+          <p class="text-xs font-medium uppercase text-slate-500">🤱 Pecho</p>
+          <p class="mt-1 text-2xl font-bold">{{ summary.breastMin.toLocaleString('es-ES') }}<span class="text-sm font-medium text-slate-500"> min</span></p>
+          <p class="text-xs text-slate-400">
+            {{ summary.breast }} tomas{{ summary.breast ? ` · ${Math.round(summary.breastMin / summary.breast)} min/toma` : '' }}
+          </p>
+        </div>
+        <div class="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+          <p class="text-xs font-medium uppercase text-slate-500">{{ day ? 'Por biberón' : 'Media diaria' }}</p>
           <p class="mt-1 text-2xl font-bold">
             {{ day ? summary.avgFeed : summary.avgDay }}<span class="text-sm font-medium text-slate-500"> ml</span>
           </p>
-          <p v-if="!day" class="text-xs text-slate-400">{{ summary.avgFeed }} ml por toma</p>
+          <p v-if="!day" class="text-xs text-slate-400">{{ summary.avgFeed }} ml por biberón</p>
         </div>
         <div class="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
           <p class="text-xs font-medium uppercase text-slate-500">💧 Mojados</p>
@@ -351,9 +375,17 @@ const inputClass =
         <h2 class="mb-3 font-semibold">Tomas del día</h2>
         <p v-if="!dayFeeds.length" class="text-sm text-slate-400">Sin tomas registradas</p>
         <div v-else class="flex flex-wrap gap-2">
-          <span v-for="f in dayFeeds" :key="f.id" class="rounded-full bg-pink-50 px-3 py-1 text-sm ring-1 ring-pink-100">
+          <span
+            v-for="f in dayFeeds"
+            :key="f.id"
+            class="rounded-full px-3 py-1 text-sm ring-1"
+            :class="f.type === 'breast' ? 'bg-rose-50 ring-rose-100' : 'bg-pink-50 ring-pink-100'"
+          >
             <span class="font-mono text-slate-500">{{ fmtTime(f.time) }}</span>
-            <span class="ml-1.5 font-semibold text-pink-700">{{ f.amount }} ml</span>
+            <span v-if="f.type === 'bottle'" class="ml-1.5 font-semibold text-pink-700">🍼 {{ f.amount }} ml</span>
+            <span v-else class="ml-1.5 font-semibold text-rose-700">
+              🤱 {{ f.duration }} min<span v-if="f.side" class="font-normal text-rose-500"> · {{ sideShort[f.side] }}</span>
+            </span>
           </span>
         </div>
       </section>

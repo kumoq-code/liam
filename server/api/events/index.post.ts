@@ -16,6 +16,38 @@ export default defineEventHandler(async (event) => {
     return addEvent({ type, time: time.toISOString(), amount: Math.round(amount), note })
   }
 
+  if (type === 'breast') {
+    const side = ['left', 'right', 'both'].includes(body.side as string)
+      ? (body.side as 'left' | 'right' | 'both')
+      : undefined
+    let duration: number
+    let endTime: string | undefined
+    if (typeof body.endTime === 'string' && body.endTime) {
+      const end = new Date(body.endTime)
+      if (Number.isNaN(end.getTime())) {
+        throw createError({ statusCode: 400, statusMessage: 'Hora de fin no válida' })
+      }
+      duration = (end.getTime() - time.getTime()) / 60000
+      if (duration <= 0) {
+        throw createError({ statusCode: 400, statusMessage: 'La hora de fin debe ser posterior al inicio' })
+      }
+      endTime = end.toISOString()
+    } else {
+      duration = Number(body.duration)
+    }
+    if (!Number.isFinite(duration) || duration <= 0 || duration > 240) {
+      throw createError({ statusCode: 400, statusMessage: 'Duración no válida (máx. 4 h)' })
+    }
+    return addEvent({
+      type,
+      time: time.toISOString(),
+      endTime,
+      duration: Math.max(1, Math.round(duration)),
+      side,
+      note,
+    })
+  }
+
   if (type === 'diaper') {
     const wet = Boolean(body.wet)
     const dirty = Boolean(body.dirty)
